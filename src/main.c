@@ -10,6 +10,7 @@
 #include <assert.h>
 #include <fcntl.h>
 #include <errno.h>
+#include "threadpool.h"
 
 #define MAX_EVENTS 5
 #define BUFFER_SIZE 10
@@ -24,11 +25,57 @@ int set_nonblocking(int fd)
 void addfd(int epollfd, int fd)
 {
   struct epoll_event event;
-  event.events = EPOLLIN;
+  event.events = EPOLLIN | EPOLLET;
   event.data.fd = fd;
   epoll_ctl(epollfd, EPOLL_CTL_ADD, fd, &event);
   set_nonblocking(fd);
 }
+
+
+void accept_connction(int listen_fd, int epollfd)
+{
+  struct sockaddr_in client;
+  socklen_t client_len = sizeof(client);
+  int fd = accept(listen_fd, (struct sockaddr*)&client, &client_len);
+  char ip[15];
+  memset(ip, 0, 15);
+  inet_ntop(AF_INET, &client.sin_addr, ip, sizeof(client));
+  printf("ip: %s prot: %d, fd: %d connect\n", ip, ntohs(client.sin_port), fd);
+  addfd(epollfd, fd);
+}
+
+void *echo_server_main(void *arg)
+{
+  char buf[BUFFER_SIZE];
+  int eventfd = (int)(arg);
+  while (1)
+  {
+    memset(buf, 0, BUFFER_SIZE);
+    int receive_byte = recv(eventfd, buf, BUFFER_SIZE, 0);
+    if (receive_byte < 0)
+    {
+      if (receive_byte == EINTR || receive_byte == EWOULDBLOCK)
+      {
+        continue;
+      }
+      printf(" sockfd %d,recv msg failed\n", eventfd );
+      close(eventfd);
+
+    }
+    else if (receive_byte == 0)
+    {
+      printf("fd %d disconnect\n", eventfd);
+      close(eventfd);
+    }
+    else
+    {
+      printf("receive data from fd: %d, data: %s\n", eventfd, buf);
+      send(eventfd, buf, receive_byte, 0);
+    }
+    break;
+  }
+}
+
 
 int main(int argc, char *argv[])
 {
@@ -54,7 +101,7 @@ int main(int argc, char *argv[])
   struct epoll_event events[MAX_EVENTS];
   int epollfd = epoll_create(5);
   addfd(epollfd, listen_fd);
-
+  threadpool_t *pool = threadpool_init(8);
   while (1)
   {
     int n = epoll_wait(epollfd, events, MAX_EVENTS, -1);
@@ -68,45 +115,15 @@ int main(int argc, char *argv[])
       int eventfd = events[i].data.fd;
       if (eventfd == listen_fd)
       {
-        struct sockaddr_in client;
-        socklen_t client_len = sizeof(client);
-        int fd = accept(listen_fd, (struct sockaddr*)&client, &client_len);
-        char ip[15];
-        memset(ip, 0, 15);
-        inet_ntop(AF_INET, &client.sin_addr, ip, sizeof(client));
-        printf("ip: %s prot: %d, fd: %d connect\n", ip, ntohs(client.sin_port), fd);
-        addfd(epollfd, fd);
+        accept_connction(listen_fd, epollfd);
       }
       else
       {
         if (events[i].events & EPOLLIN)
         {
-          char buf[BUFFER_SIZE];
-          while (1)
-          {
-            memset(buf, 0, BUFFER_SIZE);
-            int receive_byte = recv(eventfd, buf, BUFFER_SIZE, 0);
-            if (receive_byte < 0)
-            {
-              if (receive_byte == EINTR || receive_byte == EWOULDBLOCK)
-              {
-                continue;
-              }
-              printf(" sockfd %d,recv msg failed\n", eventfd );
-						  close(eventfd);
-            }
-            else if (receive_byte == 0)
-            {
-              printf("fd %d disconnect\n", eventfd);
-						  close(eventfd);
-            }
-            else
-            {
-              printf("receive data from fd: %d, data: %s\n", eventfd, buf);
-              send(eventfd, buf, receive_byte, 0);
-            }
-            break;
-          }
+          printf("-----start task----\n");
+          task_t *task = task_create(echo_server_main, (void *)eventfd);
+          threadpool_append(pool, task);
         }
       }
     }
