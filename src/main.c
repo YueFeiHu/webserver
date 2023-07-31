@@ -11,9 +11,11 @@
 #include <fcntl.h>
 #include <errno.h>
 #include "threadpool.h"
+#include "task_args.h"
 
 #define MAX_EVENTS 5
 #define BUFFER_SIZE 10
+
 int set_nonblocking(int fd)
 {
   int old_state = fcntl(fd, F_GETFL);
@@ -22,60 +24,78 @@ int set_nonblocking(int fd)
   return old_state;
 }
 
-void addfd(int epollfd, int fd)
+void reset_oneshot(int epollfd, int fd)
+{
+  struct epoll_event event;
+  event.data.fd = fd;
+  event.events = EPOLLIN | EPOLLET | EPOLLONESHOT;
+  epoll_ctl(epollfd, EPOLL_CTL_MOD, fd, &event);
+}
+
+void addfd(int epollfd, int fd, bool oneshot)
 {
   struct epoll_event event;
   event.events = EPOLLIN | EPOLLET;
+  if (oneshot)
+  {
+    event.events |= EPOLLONESHOT;
+  }
   event.data.fd = fd;
   epoll_ctl(epollfd, EPOLL_CTL_ADD, fd, &event);
   set_nonblocking(fd);
 }
 
-
 void accept_connction(int listen_fd, int epollfd)
 {
   struct sockaddr_in client;
   socklen_t client_len = sizeof(client);
-  int fd = accept(listen_fd, (struct sockaddr*)&client, &client_len);
+  int fd = accept(listen_fd, (struct sockaddr *)&client, &client_len);
   char ip[15];
   memset(ip, 0, 15);
   inet_ntop(AF_INET, &client.sin_addr, ip, sizeof(client));
   printf("ip: %s prot: %d, fd: %d connect\n", ip, ntohs(client.sin_port), fd);
-  addfd(epollfd, fd);
+  addfd(epollfd, fd, true);
 }
 
 void *echo_server_main(void *arg)
 {
   char buf[BUFFER_SIZE];
-  int eventfd = (int)(arg);
-  while (1)
+  task_args_t *args = (task_args_t *)(arg);
+  int epollfd = args->epollfd;
+  int eventfd = (int)(args->arg);
+  while (1) // epoll et 循环
   {
     memset(buf, 0, BUFFER_SIZE);
     int receive_byte = recv(eventfd, buf, BUFFER_SIZE, 0);
+
     if (receive_byte < 0)
     {
-      if (receive_byte == EINTR || receive_byte == EWOULDBLOCK)
+      if (errno == EAGAIN || errno == EWOULDBLOCK)
+      {
+        reset_oneshot(epollfd, eventfd);
+        break;
+      }
+      if (errno == EINTR)
       {
         continue;
       }
-      printf(" sockfd %d,recv msg failed\n", eventfd );
+      printf("fd: %d error occurred\n", eventfd);
       close(eventfd);
-
+      break;
     }
     else if (receive_byte == 0)
     {
       printf("fd %d disconnect\n", eventfd);
       close(eventfd);
+      break;
     }
     else
     {
       printf("receive data from fd: %d, data: %s\n", eventfd, buf);
       send(eventfd, buf, receive_byte, 0);
     }
-    break;
   }
 }
-
 
 int main(int argc, char *argv[])
 {
@@ -91,7 +111,7 @@ int main(int argc, char *argv[])
   struct sockaddr_in server;
   server.sin_family = AF_INET;
   server.sin_port = htons(port);
-  inet_pton(AF_INET, ip, (void*)&server.sin_addr);
+  inet_pton(AF_INET, ip, (void *)&server.sin_addr);
 
   int ret = bind(listen_fd, (struct sockaddr *)&server, sizeof(server));
   assert(ret != -1);
@@ -100,8 +120,8 @@ int main(int argc, char *argv[])
 
   struct epoll_event events[MAX_EVENTS];
   int epollfd = epoll_create(5);
-  addfd(epollfd, listen_fd);
-  threadpool_t *pool = threadpool_init(8);
+  addfd(epollfd, listen_fd, false);
+  threadpool_t *pool = threadpool_init(1);
   while (1)
   {
     int n = epoll_wait(epollfd, events, MAX_EVENTS, -1);
@@ -122,7 +142,10 @@ int main(int argc, char *argv[])
         if (events[i].events & EPOLLIN)
         {
           printf("-----start task----\n");
-          task_t *task = task_create(echo_server_main, (void *)eventfd);
+          task_args_t *args = (task_args_t *)malloc(sizeof(task_args_t));
+          args->epollfd = epollfd;
+          args->arg = (void *)eventfd;
+          task_t *task = task_create(echo_server_main, (void *)args);
           threadpool_append(pool, task);
         }
       }
