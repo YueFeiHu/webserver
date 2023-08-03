@@ -12,6 +12,7 @@
 #include <errno.h>
 #include "threadpool.h"
 #include "task_args.h"
+#include "http_test.h"
 
 #define MAX_EVENTS 5
 #define BUFFER_SIZE 10
@@ -115,13 +116,13 @@ int main(int argc, char *argv[])
 
   int ret = bind(listen_fd, (struct sockaddr *)&server, sizeof(server));
   assert(ret != -1);
-  ret = listen(listen_fd, 5);
+  ret = listen(listen_fd, 500);
   assert(ret != -1);
 
   struct epoll_event events[MAX_EVENTS];
-  int epollfd = epoll_create(5);
+  int epollfd = epoll_create(500);
   addfd(epollfd, listen_fd, false);
-  threadpool_t *pool = threadpool_init(1);
+  threadpool_t *pool = threadpool_init(10);
   while (1)
   {
     int n = epoll_wait(epollfd, events, MAX_EVENTS, -1);
@@ -135,6 +136,7 @@ int main(int argc, char *argv[])
       int eventfd = events[i].data.fd;
       if (eventfd == listen_fd)
       {
+        printf("accept_connection\n");
         accept_connction(listen_fd, epollfd);
       }
       else
@@ -142,10 +144,11 @@ int main(int argc, char *argv[])
         if (events[i].events & EPOLLIN)
         {
           printf("-----start task----\n");
-          task_args_t *args = (task_args_t *)malloc(sizeof(task_args_t));
-          args->epollfd = epollfd;
-          args->arg = (void *)eventfd;
-          task_t *task = task_create(echo_server_main, (void *)args);
+          // task_args_t *args = (task_args_t *)malloc(sizeof(task_args_t));
+          // args->epollfd = epollfd;
+          // args->arg = (void *)eventfd;
+          // task_t *task = task_create(echo_server_main, (void *)args);
+          task_t *task = task_create(accept_request, (void *)eventfd);
           threadpool_append(pool, task);
         }
       }
